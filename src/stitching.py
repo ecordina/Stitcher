@@ -235,25 +235,25 @@ def stitch_dragonfly_tiles(
         logger.info(f"Using Given Overlap {overlap} px")
         actual_size = tile_size - overlap
     # Refining Overlap
+    list_images = xr.concat(list_images,'stack_images')
     if refine_overlap:
-        tile_variances = tiles.var(dim=("X", "Y"))  # Use correct dim names
-        # Get the index of the tile with the highest variance
-        max_var_index = tile_variances.argmax().item()
-
-        # Extract that tile
-        highest_variance_tile = tiles.isel(dim_0=max_var_index)
         logger.info("Refining Overlap")
         one = two = False
-        if tile_number is None:
-            number_1 = str(n_max//2)
-            number_2 = str(n_max//2+1)
-        else:
-            number_1 = str(tile_number)
-            number_2 = str(tile_number+1)
+        tile_variances = list_images.var(dim=("X","Y"))
+        # Get the index of the tile with the highest variance
+        max_var_index = tile_variances.argmax().item()
+        name_max_variance = list_tiff[max_var_index]
+        row,col = dict_pos[list_tiff[max_var_index]]
+        row = 28- row 
+        col = 28- col
+        row_2 = row +1
+        col = str(col)
+        row=str(row)
+        row_2 = str(row_2)
         for stack in root.findall(".//Stack"):
-            if stack.attrib.get("COL")==number_1 and stack.attrib.get("ROW")==number_1:
+            if stack.attrib.get("COL")==col and stack.attrib.get("ROW")==row:
                 one = stack.attrib.get("IMG_REGEX")
-            if stack.attrib.get("COL")==number_1 and stack.attrib.get("ROW")==number_2:
+            if stack.attrib.get("COL")==col and stack.attrib.get("ROW")==row_2:
                 two = stack.attrib.get("IMG_REGEX")
         test_images = [one,two]
         for i,file in enumerate(test_images):
@@ -285,7 +285,7 @@ def stitch_dragonfly_tiles(
     #######################################
     # Background Substraction
     #######################################
-    list_images = xr.concat(list_images,'stack_images')
+
     if background_subtraction:
         logger.info("Substracting Background")
         list_images = list_images - list_images.min("stack_images")
