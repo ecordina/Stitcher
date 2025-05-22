@@ -1,0 +1,66 @@
+﻿<?xml version="1.0" encoding="UTF-8"?>
+<TeraStitcher volume_format="TiledXY|3Dseries">
+	<stacks_dir value="."/>
+	<ref_sys ref1="-2" ref2="1" ref3="3"/>
+	<voxel_dims D="5.15" H="0.3" V="-0.3"/>
+	<origin D="0.0" H="0.0" V="0.0"/>
+	<mechanical_displacements H="278.0" V="-278.0"/>
+	<dimensions stack_columns="2" stack_rows="2" stack_slices="-1"/>
+	<subimage resolution="0" timepoint="0"/>
+	<STACKS>
+		<Stack ABS_D="0" ABS_H="0" ABS_V="1844" COL="0" ROW="2" DIR_NAME="." IMG_REGEX="MP_Chao_250415-F1_cs_13.31.15_F408.ims" N_BYTESxCHAN="2" N_CHANS="1" STITCHABLE="no">
+			<NORTH_displacements/>
+			<EAST_displacements/>
+			<SOUTH_displacements/>
+			<WEST_displacements/>
+		</Stack>
+		<Stack ABS_D="0" ABS_H="1844" ABS_V="0" COL="2" ROW="0" DIR_NAME="." IMG_REGEX="MP_Chao_250415-F1_cs_13.31.15_F350.ims" N_BYTESxCHAN="2" N_CHANS="1" STITCHABLE="no">
+			<NORTH_displacements/>
+			<EAST_displacements/>
+			<SOUTH_displacements/>
+			<WEST_displacements/>
+		</Stack>
+		<Stack ABS_D="0" ABS_H="922" ABS_V="0" COL="1" ROW="0" DIR_NAME="." IMG_REGEX="MP_Chao_250415-F1_cs_13.31.15_F377.ims" N_BYTESxCHAN="2" N_CHANS="1" STITCHABLE="no">
+			<NORTH_displacements/>
+			<EAST_displacements/>
+			<SOUTH_displacements/>
+			<WEST_displacements/>
+		</Stack>
+		<Stack ABS_D="0" ABS_H="0" ABS_V="922" COL="0" ROW="1" DIR_NAME="." IMG_REGEX="MP_Chao_250415-F1_cs_13.31.15_F407.ims" N_BYTESxCHAN="2" N_CHANS="1" STITCHABLE="no">
+			<NORTH_displacements/>
+			<EAST_displacements/>
+			<SOUTH_displacements/>
+			<WEST_displacements/>
+		</Stack>
+		<Stack ABS_D="0" ABS_H="0" ABS_V="0" COL="0" ROW="0" DIR_NAME="." IMG_REGEX="MP_Chao_250415-F1_cs_13.31.15_F406.ims" N_BYTESxCHAN="2" N_CHANS="1" STITCHABLE="no">
+			<NORTH_displacements/>
+			<EAST_displacements/>
+			<SOUTH_displacements/>
+			<WEST_displacements/>
+		</Stack>
+		<Stack ABS_D="0" ABS_H="922" ABS_V="922" COL="1" ROW="1" DIR_NAME="." IMG_REGEX="MP_Chao_250415-F1_cs_13.31.15_F376.ims" N_BYTESxCHAN="2" N_CHANS="1" STITCHABLE="no">
+			<NORTH_displacements/>
+			<EAST_displacements/>
+			<SOUTH_displacements/>
+			<WEST_displacements/>
+		</Stack>
+		<Stack ABS_D="0" ABS_H="1844" ABS_V="922" COL="2" ROW="1" DIR_NAME="." IMG_REGEX="MP_Chao_250415-F1_cs_13.31.15_F351.ims" N_BYTESxCHAN="2" N_CHANS="1" STITCHABLE="no">
+			<NORTH_displacements/>
+			<EAST_displacements/>
+			<SOUTH_displacements/>
+			<WEST_displacements/>
+		</Stack>
+		<Stack ABS_D="0" ABS_H="922" ABS_V="1844" COL="1" ROW="2" DIR_NAME="." IMG_REGEX="MP_Chao_250415-F1_cs_13.31.15_F375.ims" N_BYTESxCHAN="2" N_CHANS="1" STITCHABLE="no">
+			<NORTH_displacements/>
+			<EAST_displacements/>
+			<SOUTH_displacements/>
+			<WEST_displacements/>
+		</Stack>
+		<Stack ABS_D="0" ABS_H="14752" ABS_V="14752" COL="2" ROW="2" DIR_NAME="." IMG_REGEX="MP_Chao_250415-F1_cs_13.31.15_F352.ims" N_BYTESxCHAN="2" N_CHANS="1" STITCHABLE="no">
+			<NORTH_displacements/>
+			<EAST_displacements/>
+			<SOUTH_displacements/>
+			<WEST_displacements/>
+		</Stack>
+	</STACKS>
+</TeraStitcher>

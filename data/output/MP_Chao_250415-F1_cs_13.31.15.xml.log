@@ -1,0 +1,12 @@
+2025-05-22 18:35:56,400 - INFO - Using Crop Overlap
+2025-05-22 18:35:56,401 - INFO - Found 9 tiles for experiment MP_Chao_250415-F1_cs_13.31.15
+2025-05-22 18:35:56,571 - INFO - Tile size is: 1024
+2025-05-22 18:35:56,572 - INFO - Actual size is: 922
+2025-05-22 18:35:56,572 - INFO - Overlap Found in XML to be 102 px
+2025-05-22 18:35:56,587 - INFO - Refining Overlap
+2025-05-22 18:35:56,739 - INFO - Using An Overlap of 122 px
+2025-05-22 18:35:56,739 - INFO - Substracting Background
+2025-05-22 18:35:56,755 - INFO - Performing Flat-Field Correction
+2025-05-22 18:35:56,895 - INFO - Stitching Done!
+2025-05-22 18:35:56,895 - INFO - Saving to ./data/output
+2025-05-22 18:35:57,139 - INFO - All Done Successfully!

@@ -18,7 +18,8 @@ CROP_OVERLAP="--crop_overlap" # leave empty to use max projection on the overlap
 NO_BACKGROUND=""          # leave empty to enable background subtraction
 attrs="{'Instrument':'Dragonfly'}" # Attributes to attach to the zarr, only used when save_format == zarr
 logger="--disable_logger" # Take off to activate Logger
-
+IMAGE_PREFIX="" # In case the image prefix is different than the one in the metadata /!\, has to be complete as the code will look for image_prefix+"_F\d+"
+		# ie: For MP_20250411-C1_14.38.46_F000.ims, IMAGE_PREFIX = "MP_20250411-C1_14.38.46" 
 # Run the Python script
 # Loop over all XML files in the folder
 for XML_FILE in "$FOLDER"/*.xml; do
@@ -31,6 +32,7 @@ for XML_FILE in "$FOLDER"/*.xml; do
       --output_path "$OUTPUT_PATH" \
       --overlap "$OVERLAP" \
       --attrs "$attrs" \
+      --image_prefix "$IMAGE_PREFIX" \
       $MAX_PROJECT \
       $REFINE_OVERLAP \
       $CROP_OVERLAP \

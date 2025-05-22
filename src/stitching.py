@@ -75,9 +75,11 @@ def stitch_dragonfly_tiles(
     output_path: str = "./",
     max_project: bool = True,
     background_subtraction: bool = True,
+    flat_field_path: str = '',
     dims: Optional[dict] = {"Cycle":0,"Channel":1,"Z":2,"X":3,"Y":4},
     save_format: str = "tiff",
     tile_size: Optional[int] = None,
+    image_prefix: Optional[str] = "",
     overlap: Optional[int|str] = None,
     refine_overlap: Optional[bool] = None,
     tile_number: Optional[int] = None,
@@ -101,12 +103,17 @@ def stitch_dragonfly_tiles(
         Whether to perform max projection along Z-axis, by default True.
     background_subtraction : bool, optional
         Whether to subtract the minimum across time/channel for background removal, by default True.
+    flat_field_path : str, optional
+        Path to the Flat-Field image, if specified will perform Flat-field correction, if not, won't perform it
+        Can be tiff files or ims, needs to be the full path image
     dims_order : str, optional
         Dimensional order of the image (e.g., "TCZXY"), by default "TCZXY".
     save_format : str, optional
         Output format, either "tiff" or "zarr", by default "tiff".
     tile_size : int, optional
         Size of each tile. If None, inferred from the first tile.
+    image_prefix : str, optional
+        Name of the Prefix of the tiles, to use instead of looking into the metadata
     overlap : int, optional
         Overlap in pixels between adjacent tiles. If None, inferred from metadata.
     refine_overlap : bool, optional
@@ -116,7 +123,9 @@ def stitch_dragonfly_tiles(
     crop_overlap : bool, optional
         Use hard cropping to remove overlap regions, by default False.
     offset_channel : np.ndarray, optional
-        Placeholder for per-channel offset corrections. Not implemented.
+        Placeholder for per-channel offset corrections. Not implemented yet.
+    disable_logger: bool, optional
+        Set True to disable Logging
 
     Raises
     ------
@@ -129,6 +138,7 @@ def stitch_dragonfly_tiles(
     """
 
     if disable_logger:
+        logger.info("Disabling Logger")
         logger.disabled=True
     else:
         # Create a file handler to write logs to a file
@@ -139,7 +149,8 @@ def stitch_dragonfly_tiles(
         else:
             now = datetime.datetime.now()
             name  = now.strftime("Stitching_date_%Y_%m_time_%d_%H_%M_%S")
-        file_handler = logging.FileHandler(f'{name}.log')
+        os.makedirs(output_path,exist_ok=True)
+        file_handler = logging.FileHandler(os.path.join(output_path,f'{name}.log'))
         file_handler.setLevel(logging.DEBUG)
         file_handler.setFormatter(formatter)
 
@@ -157,7 +168,7 @@ def stitch_dragonfly_tiles(
         logger.info("Folder is None and XML file is given, assuming the tiles are in the same folder as the xml")
         folder = os.path.dirname(xml_file)+"/"
     if (xml_file is None or xml_file==""):
-        logger.warning("XML file is None and Folder is given, assuming the xml is in the same folder as the tiles and\n /!\ /!\ assuming that there is only one xml file in it (One Experiment) /!\/!\ ")
+        logger.warning(r"XML file is None and Folder is given, assuming the xml is in the same folder as the tiles and\n /!\ /!\ assuming that there is only one xml file in it (One Experiment) /!\/!\ ")
         xml_file = [os.path.join(folder,f) for f in os.listdir(folder) if f.endswith("xml")][0]
         logger.info(f"Using {os.path.basename(xml_file)}")
     if save_format not in ("tiff", "zarr"):
@@ -180,12 +191,15 @@ def stitch_dragonfly_tiles(
 
     # Parse positions from XML
     root = ET.parse(xml_file).getroot()
+    n_max = max(int(root.find("dimensions").attrib.get("stack_columns")),int(root.find("dimensions").attrib.get("stack_rows"))) + 1
     list_tiff = list()
     dict_pos = {}
     for stack in root.findall(".//Stack"):
         file_name = stack.attrib.get("IMG_REGEX")
-        y = 28 - int(stack.attrib.get("ROW"))
-        x = 28 - int(stack.attrib.get("COL"))
+        if image_prefix!="":
+            file_name = image_prefix+file_name[-9:]
+        y = n_max - 1 -int(stack.attrib.get("ROW"))
+        x = n_max - 1 - int(stack.attrib.get("COL"))
         dict_pos[file_name] = [y, x]
         list_tiff.append(file_name)
     logger.info(f"Found {len(list_tiff)} tiles for experiment {os.path.basename(xml_file)[:-4]}")
@@ -193,13 +207,14 @@ def stitch_dragonfly_tiles(
     # Open All Images 
     # #######################################
 
-    n_max = np.array(list(dict_pos.values())).max() + 1
     list_images = []
     f_name = f"Loading {os.path.basename(xml_file).split('.')[0]} Images"
     for file in tqdm(list_tiff,desc=f_name):
         try:
             if file.endswith(".tiff") or file.endswith(".tif"):
                 img = imread(os.path.join(folder, file))
+                while len(img.shape)<len(dims):
+                    img = np.expand_dims(img,axis=0)
             elif file.endswith(".ims"):
                 blockPrint()
                 img = ims(os.path.join(folder, file),squeeze_output=False)[:]
@@ -221,11 +236,13 @@ def stitch_dragonfly_tiles(
     #######################################
     if tile_size is None:
         tile_size = len(list_images[0].X)
+        logger.info(f"Tile size is: {tile_size}")
     # Getting Overlap from XML
     if overlap is None or overlap=='':
         for stack in root.findall(".//Stack"):
             if stack.attrib.get("COL")=="1":
                 actual_size = int(stack.attrib.get("ABS_H"))
+                logger.info(f"Actual size is: {actual_size}")
                 break
         overlap = tile_size-actual_size
         logger.info(f"Overlap Found in XML to be {overlap} px")
@@ -238,17 +255,22 @@ def stitch_dragonfly_tiles(
     list_images = xr.concat(list_images,'stack_images')
     if refine_overlap:
         logger.info("Refining Overlap")
-        one = two = False
+        one = two = None
         tile_variances = list_images.var(dim=("X","Y"))
         # Get the index of the tile with the highest variance
         max_var_index = tile_variances.argmax().item()
         name_max_variance = list_tiff[max_var_index]
         row,col = dict_pos[list_tiff[max_var_index]]
-        row = 28- row 
-        col = 28- col
-        row_2 = row +1
+        row = n_max - 1 - row 
+        col = n_max - 1 - col
+        row_2 = row + 1
+        if col == n_max:
+            col = col - 1
+        if row_2 > n_max-1:
+            row_2 = n_max - 1
+            row = n_max - 2
         col = str(col)
-        row=str(row)
+        row = str(row)
         row_2 = str(row_2)
         for stack in root.findall(".//Stack"):
             if stack.attrib.get("COL")==col and stack.attrib.get("ROW")==row:
@@ -260,6 +282,8 @@ def stitch_dragonfly_tiles(
             try:
                 if file.endswith(".tiff") or file.endswith(".tif"):
                     test_images[i] = imread(os.path.join(folder, file))
+                    while len(test_images[i].shape)<len(dims):
+                        test_images[i] = np.expand_dims(test_images[i],axis=0)
                 elif file.endswith(".ims"):
                     blockPrint()
                     test_images[i] = ims(os.path.join(folder, file),squeeze_output=False)[:]
@@ -285,11 +309,34 @@ def stitch_dragonfly_tiles(
     #######################################
     # Background Substraction
     #######################################
-
     if background_subtraction:
         logger.info("Substracting Background")
-        list_images = list_images - list_images.min("stack_images")
-
+        D_image = list_images.min("stack_images") # Background
+        list_images = list_images - D_image
+    #######################################
+    # Flat-Field Correction
+    #######################################
+    if flat_field_path is not None and flat_field_path!="":
+        logger.info("Performing Flat-Field Correction")
+        if flat_field_path.endswith("tiff") or flat_field_path.endswith("tif"):
+            flat_field_image = imread(flat_field_path)
+            while len(flat_field_image.shape)<len(dims):
+                flat_field_image = np.expand_dims(flat_field_image,axis=0)
+        elif file.endswith(".ims"):
+            blockPrint()
+            flat_field_image = ims(flat_field_path,squeeze_output=False)[:]
+            enablePrint()
+        flat_field_image = xr.DataArray(flat_field_image,dims=dims)
+        if max_project:
+            flat_field_image = flat_field_image.max("Z")
+        flat_field_image = flat_field_image.squeeze()
+        D_image = list_images.min("stack_images") # Background, D Image in Flat-Field Correction
+        m = (flat_field_image - D_image).mean()
+        G_image = m / (flat_field_image - D_image)
+        list_images = (list_images - D_image) * G_image
+    #######################################
+    # Create Empty Tiled Image
+    #######################################
     dims_final = dict()
     for dim in list_images.dims:
         if dim not in ["X","Y","stack_images"]:
@@ -389,12 +436,20 @@ def main():
         help="Disable background subtraction."
     )
     parser.add_argument(
+        "--flat_field_path", type=str, required=False,
+        help="Full Path to the Flat Field Image to perform Flat Field Correction, leave empty to not perform it"
+    )
+    parser.add_argument(
         "--dims", type=ast.literal_eval, default={"Cycle":0,"Channel":1,"Z":2,"X":3,"Y":4},
         help='Dimension order of the input images (default: {"Cycle":0,"Channel":1,"Z":2,"X":3,"Y":4}).'
     )
     parser.add_argument(
         "--attrs", type=ast.literal_eval, default=None,
         help='Attributes to attach to the zarr file. Only used when save_format is zarr. (Ex: {"Lateral Resolution":0.118},"Units":um})'
+    )
+    parser.add_argument(
+        "--image_prefix",type=str,default='',required=False,
+        help="Use this as prefix for the tiles instead of the name from the metadata"
     )
     parser.add_argument(
         "--save_format", type=str, choices=["tiff", "zarr"], default="tiff",
@@ -427,6 +482,8 @@ def main():
         output_path=args.output_path,
         max_project=args.max_project,
         background_subtraction=not args.no_background_subtraction,
+        flat_field_path=args.flat_field_path,
+        image_prefix=args.image_prefix,
         dims=args.dims,
         save_format=args.save_format,
         tile_size=args.tile_size,
