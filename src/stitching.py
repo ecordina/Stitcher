@@ -191,15 +191,15 @@ def stitch_dragonfly_tiles(
 
     # Parse positions from XML
     root = ET.parse(xml_file).getroot()
-    n_max = max(int(root.find("dimensions").attrib.get("stack_columns")),int(root.find("dimensions").attrib.get("stack_rows"))) + 1
+    n_max = max(int(root.find("dimensions").attrib.get("stack_columns")),int(root.find("dimensions").attrib.get("stack_rows"))) 
     list_tiff = list()
     dict_pos = {}
     for stack in root.findall(".//Stack"):
         file_name = stack.attrib.get("IMG_REGEX")
         if image_prefix!="":
             file_name = image_prefix+file_name[-9:]
-        y = n_max - 1 -int(stack.attrib.get("ROW"))
-        x = n_max - 1 - int(stack.attrib.get("COL"))
+        y = n_max  - int(stack.attrib.get("ROW"))
+        x = n_max  - int(stack.attrib.get("COL"))
         dict_pos[file_name] = [y, x]
         list_tiff.append(file_name)
     logger.info(f"Found {len(list_tiff)} tiles for experiment {os.path.basename(xml_file)[:-4]}")
@@ -256,15 +256,15 @@ def stitch_dragonfly_tiles(
     if refine_overlap:
         logger.info("Refining Overlap")
         one = two = None
-        tile_variances = list_images.var(dim=("X","Y"))
+        tile_variances = list_images.var(dim=[dim for dim in list_images.dims if dim!="stack_images"])
         # Get the index of the tile with the highest variance
-        max_var_index = tile_variances.argmax().item()
+        max_var_index = tile_variances.argmax(axis=0).item()
         name_max_variance = list_tiff[max_var_index]
         row,col = dict_pos[list_tiff[max_var_index]]
-        row = n_max - 1 - row 
-        col = n_max - 1 - col
+        row = n_max  - row 
+        col = n_max  - col
         row_2 = row + 1
-        if col == n_max:
+        if col >= n_max:
             col = col - 1
         if row_2 > n_max-1:
             row_2 = n_max - 1
@@ -341,8 +341,8 @@ def stitch_dragonfly_tiles(
     for dim in list_images.dims:
         if dim not in ["X","Y","stack_images"]:
             dims_final[dim] = len(list_images[dim])
-    dims_final["X"] = tile_size * n_max
-    dims_final["Y"] = tile_size * n_max
+    dims_final["X"] = tile_size * (n_max+1)
+    dims_final["Y"] = tile_size * (n_max+1)
     stitched = xr.DataArray(np.zeros(list(dims_final.values())),dims=list(dims_final.keys()))
     #######################################
     # Cropping Stitch
@@ -398,7 +398,7 @@ def stitch_dragonfly_tiles(
     for dim in thumbnail.dims:
         if dim not in ["X","Y"]:
             thumbnail =  thumbnail.max(dim)
-    thumbnail = downscale_local_mean(thumbnail,5)
+    thumbnail = downscale_local_mean(thumbnail.to_numpy(),5)
     thumbnail = equalize_hist(thumbnail,mask=thumbnail>np.percentile(thumbnail,40))
     thumbnail = rescale_intensity(thumbnail, in_range=(np.percentile(thumbnail,1),np.percentile(thumbnail,98)),out_range=np.uint16)
     thumbnail_name = os.path.basename(xml_file).split('.')[0]
