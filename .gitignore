@@ -1,0 +1,5 @@
+# Ignore Output Directory
+data/output/
+
+# Ignore all shell scripts
+*.sh
