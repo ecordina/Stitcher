@@ -5,4 +5,5 @@ data/output/
 *.sh
 .pytest_cache
 .tests/.pytest_cache
+.tests/__pycache__
 src/__pycache__/
