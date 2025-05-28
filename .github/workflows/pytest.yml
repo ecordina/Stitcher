@@ -17,9 +17,10 @@ jobs:
         uses: conda-incubator/setup-miniconda@v2.0.1 # https://github.com/conda-incubator/setup-miniconda.
         with:
           channels: conda-forge,bioconda,defaults
-          installer-url: https://github.com/conda-forge/miniforge/releases/latest/download/Mambaforge-Linux-x86_64.sh
           channel-priority: true
           environment-file: environment.yaml
+          activate-environment: stitching
+          auto-activate-base: true
       - name: Test
         shell: bash -l {0}  # Needed for conda
         run: pytest .tests
