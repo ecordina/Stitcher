@@ -15,15 +15,11 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set up Miniconda
-        uses: conda-incubator/setup-miniconda@v3
+        uses: mamba-org/setup-micromamba@v2
         with:
-          auto-activate-base: false
-          miniforge-variant: Mambaforge  # Use faster conda solver
           python-version: 3.13.3
           environment-file: environment.yml
-          activate-environment: stitching-env
-
+          activate-environment: stitching
       - name: Run Pytest
-        shell: bash -l {0}  # ensures conda env is loaded
-        run: |
-          pytest .tests  # adjust if your tests are elsewhere
+        shell: micromamba-shell -l {0}  # ensures conda env is loaded
+        run: pytest .tests  # adjust if your tests are elsewhere
