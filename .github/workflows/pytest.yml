@@ -11,27 +11,16 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v2.3.4
 
-      - name: Set up Miniconda
-        uses: mamba-org/setup-micromamba@v2
+      - name: Install conda
+        uses: conda-incubator/setup-miniconda@v2.0.1 # https://github.com/conda-incubator/setup-miniconda.
         with:
-          python-version: 3.13.3
+          channels: conda-forge,bioconda,defaults
+          installer-url: https://github.com/conda-forge/miniforge/releases/latest/download/Mambaforge-Linux-x86_64.sh
+          channel-priority: true
           environment-file: environment.yaml
-          init-shell: >-
-            bash
-            powershell
-          cache-environment: true
-          post-cleanup: 'all'
-          
-      - name: Import numpy in micromamba environment (bash)
-        run: python -c "import numpy"
-        shell: bash -el {0}
-      - name: Import numpy in micromamba environment (pwsh)
-        run: python -c "import numpy"
-        shell: pwsh
-      - name: Run custom command in micromamba environment
+      - name: Test
+        shell: bash -l {0}  # Needed for conda
         run: pytest .tests
-        shell: micromamba-shell {0}
         
