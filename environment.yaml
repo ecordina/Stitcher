@@ -294,4 +294,7 @@ dependencies:
   - pip:
     - h5py==3.13.0
     - imaris-ims-file-reader==0.1.8
+    - iniconfig==2.1.0
+    - pluggy==1.6.0
+    - pytest==8.3.5
 prefix: /gpfs/commons/home/ecordina/mambaforge/envs/stitching
