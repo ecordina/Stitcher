@@ -3,3 +3,6 @@ data/output/
 
 # Ignore all shell scripts
 *.sh
+.pytest_cache
+.tests/.pytest_cache
+src/__pycache__/

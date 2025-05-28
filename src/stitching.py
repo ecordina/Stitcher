@@ -45,28 +45,36 @@ def find_translation(ref: np.ndarray, src: np.ndarray) -> Tuple[float, float]:
 
 
 
-def crop_zero_borders(image: np.ndarray) -> np.ndarray:
+def crop_zero_borders(image: xr.DataArray) -> xr.DataArray:
     """
-    Crop the image to exclude all-zero rows and columns from the borders.
+    Crop an xarray image to exclude all-zero borders along 'X' and 'Y' dimensions.
 
     Parameters:
-    - image (np.ndarray): The input image array.
+    - image (xr.DataArray): Input image with dims including 'X' and 'Y'.
 
     Returns:
-    - np.ndarray: Cropped image.
+    - xr.DataArray: Cropped image.
     """
-    if image.ndim == 2:
-        non_zero_rows = np.any(image != 0, axis=1)
-        non_zero_cols = np.any(image != 0, axis=0)
-    elif image.ndim == 3:
-        non_zero_rows = np.any(image != 0, axis=(1, 2))
-        non_zero_cols = np.any(image != 0, axis=(0, 2))
-    else:
-        raise ValueError("Unsupported image dimensionality: expected 2D or 3D.")
+    if 'X' not in image.dims or 'Y' not in image.dims:
+        raise ValueError("Input DataArray must have 'X' and 'Y' dimensions.")
 
-    row_start, row_end = np.where(non_zero_rows)[0][[0, -1]]
-    col_start, col_end = np.where(non_zero_cols)[0][[0, -1]]
-    return image[row_start:row_end + 1, col_start:col_end + 1]
+    # Identify non-zero regions along Y and X
+    reduced_y = image.any(dim=[d for d in image.dims if d != 'Y'], keepdims=False)
+    reduced_x = image.any(dim=[d for d in image.dims if d != 'X'], keepdims=False)
+
+    non_zero_y = reduced_y.values.nonzero()[0]
+    non_zero_x = reduced_x.values.nonzero()[0]
+
+    if len(non_zero_y) == 0 or len(non_zero_x) == 0:
+        return image.isel({ 'Y': slice(0, 0), 'X': slice(0, 0) })  # Return empty slice if all zero
+
+    y_start, y_end = non_zero_y[0], non_zero_y[-1] + 1
+    x_start, x_end = non_zero_x[0], non_zero_x[-1] + 1
+
+    return image.isel(X=slice(x_start, x_end), Y=slice(y_start, y_end))
+
+
+    
 
 
 def stitch_dragonfly_tiles(
@@ -82,11 +90,11 @@ def stitch_dragonfly_tiles(
     image_prefix: Optional[str] = "",
     overlap: Optional[int|str] = None,
     refine_overlap: Optional[bool] = None,
-    tile_number: Optional[int] = None,
-    max_overlap: bool = True,
+    max_overlap: bool = False,
     crop_overlap: bool = False,
     offset_channel: Optional[np.ndarray] = None,
     disable_logger: Optional[bool] = False,
+    attrs: Optional[dict] = None,
 ) -> None:
     """
     Stitch tiled TIFF images from Dragonfly output using positions defined in an XML file.
@@ -178,8 +186,11 @@ def stitch_dragonfly_tiles(
     if not list_tiff:
         raise FileNotFoundError("No TIFF or IMS files found in the folder.")
     if not ((max_overlap and not crop_overlap) or (not max_overlap and crop_overlap)):
-        logger.error("Both Stitching Method were chosen, only one is accepted!")
-        raise valueError("Both Stitching Method were chosen, only one is accepted!")
+        if (not max_overlap and not crop_overlap):
+            logger.info("No Stitching method given, defaulting to Crop Overlap")
+        else:
+            logger.error("Both Stitching Method were chosen, only one is accepted!")
+            raise valueError("Both Stitching Method were chosen, only one is accepted!")
     logger.info("Using Crop Overlap" if crop_overlap else "Using Max Projection Overlap" )
 
     # Disable
@@ -357,7 +368,7 @@ def stitch_dragonfly_tiles(
             end_tile_x = begin_tile_x+actual_size
             end_tile_y = begin_tile_y+actual_size
             stitched.loc[dict(X=slice(begin_tile_x, end_tile_x), Y= slice(begin_tile_y, end_tile_y))] = list_images.sel(stack_images=i,X=slice(0,actual_size),Y=slice(0,actual_size))
-        stitched = crop_zero_borders(stitched)
+        
     #######################################
     # Max Overlap Stitch
     #######################################
@@ -381,14 +392,26 @@ def stitch_dragonfly_tiles(
             stitched.loc[dict(Y=slice(begin_tile_y ,begin_tile_y+overlap), X=slice(begin_tile_x,end_tile_x))]  = xr.concat(([list_images.sel(stack_images=i,Y=slice(0,overlap))          , stitched.sel(Y=slice(begin_tile_y ,begin_tile_y+overlap), X=slice(begin_tile_x,end_tile_x))]),dim="max").max("max")
             # Bottom [:,-overlap:]
             stitched.loc[dict(Y=slice(end_tile_y-overlap,end_tile_y),      X=slice(begin_tile_x,end_tile_x))]  = xr.concat(([list_images.sel(stack_images=i,Y=slice(-overlap,tile_size)) , stitched.sel(Y=slice(end_tile_y-overlap,end_tile_y),      X=slice(begin_tile_x,end_tile_x))]),dim="max").max("max")
-        stitched = crop_zero_borders(stitched)
 
     logger.info("Stitching Done!")
     logger.info(f"Saving to {output_path}")
     # Channel offset placeholder
-    if offset_channel is not None:
-        if type(offset_channel)==int or len(offset_channel)==len(stitched.Channel):
-            stitched = stitched.shift(offset_channel,dims="Channel")
+    if offset_channel is not None and 'Channel' in stitched.dims:
+        try:
+            if isinstance(offset_channel, (int, float)):
+                # Shift all channels by the same amount along the Y and X dims
+                for ch in stitched.Channel.values:
+                    stitched.loc[dict(Channel=ch)] = stitched.sel(Channel=ch).shift(X=offset_channel, Y=offset_channel, fill_value=0)
+            elif hasattr(offset_channel, '__len__') and len(offset_channel) == stitched.sizes['Channel']:
+                for ch, shift_val in zip(stitched.Channel.values, offset_channel):
+                    stitched.loc[dict(Channel=ch)] = stitched.sel(Channel=ch).shift(X=shift_val, Y=shift_val, fill_value=0)
+            else:
+                logger.error(
+                    f"Error: `offset_channel` is {offset_channel}, expected a scalar or a list of length {len(stitched.Channel)}"
+                )
+        except Exception as e:
+            logger.error(f"Exception while shifting channels: {e}")
+
 
 
 
@@ -403,11 +426,12 @@ def stitch_dragonfly_tiles(
     thumbnail = rescale_intensity(thumbnail, in_range=(np.percentile(thumbnail,1),np.percentile(thumbnail,98)),out_range=np.uint16)
     thumbnail_name = os.path.basename(xml_file).split('.')[0]
     plt.imsave(os.path.join(output_path, f"thumbnail_{thumbnail_name}.png"), thumbnail , cmap="gray")
-    stitched = stitched.astype(np.uint16)
     if save_format == "tiff":
         imwrite(os.path.join(output_path, f"{base_name}.tiff"), stitched)
     elif save_format == "zarr":
-        zarr.save(os.path.join(output_path, f"{base_name}.zarr"), stitched)
+        if attrs is not None:
+            stitched.attrs.update(attrs)
+        stitched.to_zarr(os.path.join(output_path, f"{base_name}.zarr"))
     logger.info("All Done Successfully!")
 
 
@@ -492,7 +516,8 @@ def main():
         max_overlap=not args.crop_overlap,
         crop_overlap=args.crop_overlap,
         disable_logger=args.disable_logger,
-        offset_channel=None  # Future implementation
+        offset_channel=None,  # Future implementation
+        attrs = args.attrs,
     )
 
 if __name__ == "__main__":
