@@ -394,9 +394,9 @@ def stitch_dragonfly_tiles(
             stitched.loc[dict(Y=slice(end_tile_y-overlap,end_tile_y),      X=slice(begin_tile_x,end_tile_x))]  = xr.concat(([list_images.sel(stack_images=i,Y=slice(-overlap,tile_size)) , stitched.sel(Y=slice(end_tile_y-overlap,end_tile_y),      X=slice(begin_tile_x,end_tile_x))]),dim="max").max("max")
 
     logger.info("Stitching Done!")
-    logger.info(f"Saving to {output_path}")
     # Channel offset placeholder
     if offset_channel is not None and 'Channel' in stitched.dims:
+        logger.info("Offsetting Channels")
         try:
             if isinstance(offset_channel, (int, float)):
                 # Shift all channels by the same amount along the Y and X dims
@@ -412,9 +412,10 @@ def stitch_dragonfly_tiles(
         except Exception as e:
             logger.error(f"Exception while shifting channels: {e}")
 
-
-
-
+    logger.info("Cropping Empty tiles")
+    stitched = crop_zero_borders(stitched)
+    logger.info(f"Final array size is: {stitched.shape}")
+    logger.info(f"Saving to {output_path}")
     # Save stitched image and thumbnail
     base_name = os.path.commonprefix(list_tiff)[:-2]
     thumbnail = stitched.copy()
