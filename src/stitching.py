@@ -557,6 +557,7 @@ def stitch_dragonfly_tiles(
                 subifds=subresolutions,
                 resolution=(1 / pixelsize, 1 / pixelsize),
                 metadata=metadata,
+                photometric='minisblack',
             )
 
             for level in range(subresolutions):
@@ -567,10 +568,11 @@ def stitch_dragonfly_tiles(
                     description=ome_xml,
                     subfiletype=1,
                     resolution=(1 / mag / pixelsize, 1 / mag / pixelsize),
+                    photometric='minisblack',
                 )
 
             # Write thumbnail as a separate series
-            thumb_dims = tuple(i for i, ax in enumerate(stitched.dims) if ax not in ["X", "Y"])
+            thumb_dims = tuple(ax for i, ax in enumerate(stitched.dims) if ax not in ["X", "Y"])
             thumbnail = (stitched.max(thumb_dims).to_numpy()[::8, ::8]>>2).astype('uint8')
             tif.write(thumbnail, metadata={'Name': 'thumbnail'})
     elif save_format == "zarr":
