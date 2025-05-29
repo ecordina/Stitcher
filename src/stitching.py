@@ -7,7 +7,7 @@ from skimage.registration import phase_cross_correlation
 import os
 import numpy as np
 import xml.etree.ElementTree as ET
-from tifffile import imread, imwrite
+from tifffile import imread, imwrite, TiffWriter
 from skimage.transform import downscale_local_mean
 from tqdm import tqdm
 import matplotlib.pyplot as plt
@@ -18,6 +18,8 @@ from imaris_ims_file_reader.ims import ims
 import traceback
 import ast
 import datetime
+
+
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 # Create a formatter to define the log format
@@ -26,6 +28,61 @@ formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
 # Environment:
 # mamba install matplotlib tqdm scikit-image python zarr xarray
 # pip install imaris-ims-file-reader
+
+def build_ome_xml(stitched, voxel_x, voxel_y, voxel_z, significantBits=16, base_name="Image0"):
+
+    # Full OME dimensions in required order
+    ome_dims = ["T","C","Z","Y","X"]
+    default_dim_sizes = {"T": 1,"C": 1,"Z": 1,"Y": 1,"X": 1}
+
+    # Extract dimension sizes from stitched DataArray
+    for dim in stitched.dims:
+        default_dim_sizes[dim] = stitched.sizes[dim]
+
+    # Determine OME-XML pixel type
+    dtype_map = {
+        np.dtype('uint8'): 'uint8',
+        np.dtype('uint16'): 'uint16',
+        np.dtype('float32'): 'float',
+        np.dtype('float64'): 'double'
+    }
+    dtype_str = dtype_map.get(stitched.dtype, 'uint16')
+
+    # Compose <Channel> tags if 'C' is present
+    channel_elems = ""
+    num_channels = default_dim_sizes["C"]
+    for c in range(num_channels):
+        channel_elems += f'''
+   <Channel ID="Channel:0:{c}" SamplesPerPixel="1"><LightPath/></Channel>'''
+
+    # Total number of planes = T * C * Z
+    plane_count = default_dim_sizes["T"] * default_dim_sizes["C"] * default_dim_sizes["Z"]
+
+    ome_xml = f'''<?xml version="1.0" encoding="UTF-8"?>
+<OME xmlns="http://www.openmicroscopy.org/Schemas/OME/2016-06"
+     xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+     xsi:schemaLocation="http://www.openmicroscopy.org/Schemas/OME/2016-06
+                         http://www.openmicroscopy.org/Schemas/OME/2016-06/ome.xsd">
+ <Image ID="Image:0" Name="{base_name}">
+  <Pixels ID="Pixels:0"
+          DimensionOrder="TCZYX"
+          Type="{dtype_str}"
+          SizeX="{default_dim_sizes['X']}"
+          SizeY="{default_dim_sizes['Y']}"
+          SizeC="{default_dim_sizes['C']}"
+          SizeZ="{default_dim_sizes['Z']}"
+          SizeT="{default_dim_sizes['T']}"
+          PhysicalSizeX="{voxel_x}" PhysicalSizeXUnit="um"
+          PhysicalSizeY="{voxel_y}" PhysicalSizeYUnit="um"
+          PhysicalSizeZ="{voxel_z}" PhysicalSizeZUnit="um"
+          SignificantBits="{significantBits}">
+{channel_elems}
+   <TiffData IFD="0" PlaneCount="{plane_count}"/>
+  </Pixels>
+ </Image>
+</OME>'''
+    return ome_xml
+
 
 def find_translation(ref: np.ndarray, src: np.ndarray) -> Tuple[float, float]:
     """
@@ -84,8 +141,8 @@ def stitch_dragonfly_tiles(
     max_project: bool = True,
     background_subtraction: bool = True,
     flat_field_path: str = '',
-    dims: Optional[dict] = {"Cycle":0,"Channel":1,"Z":2,"X":3,"Y":4},
-    save_format: str = "tiff",
+    dims: Optional[dict] = {"T":0,"C":1,"Z":2,"Y":3,"X":4},
+    save_format: str = "tif",
     tile_size: Optional[int] = None,
     image_prefix: Optional[str] = "",
     overlap: Optional[int|str] = None,
@@ -117,7 +174,7 @@ def stitch_dragonfly_tiles(
     dims_order : str, optional
         Dimensional order of the image (e.g., "TCZXY"), by default "TCZXY".
     save_format : str, optional
-        Output format, either "tiff" or "zarr", by default "tiff".
+        Output format, either "tif" or "zarr", by default "tif".
     tile_size : int, optional
         Size of each tile. If None, inferred from the first tile.
     image_prefix : str, optional
@@ -138,7 +195,7 @@ def stitch_dragonfly_tiles(
     Raises
     ------
     ValueError
-        If `save_format` is not "tiff" or "zarr".
+        If `save_format` is not "tif" or "zarr".
     FileNotFoundError
         If no TIFF files are found in the specified folder.
     AssertionError
@@ -179,8 +236,8 @@ def stitch_dragonfly_tiles(
         logger.warning(r"XML file is None and Folder is given, assuming the xml is in the same folder as the tiles and\n /!\ /!\ assuming that there is only one xml file in it (One Experiment) /!\/!\ ")
         xml_file = [os.path.join(folder,f) for f in os.listdir(folder) if f.endswith("xml")][0]
         logger.info(f"Using {os.path.basename(xml_file)}")
-    if save_format not in ("tiff", "zarr"):
-        raise ValueError("save_format must be 'tiff' or 'zarr'")
+    if save_format not in ("tif", "zarr"):
+        raise ValueError("save_format must be 'tif' or 'zarr'")
 
     list_tiff = sorted([f for f in os.listdir(folder) if f.endswith("tiff") or f.endswith("tif") or f.endswith("ims")])
     if not list_tiff:
@@ -202,6 +259,8 @@ def stitch_dragonfly_tiles(
 
     # Parse positions from XML
     root = ET.parse(xml_file).getroot()
+    voxel_elem = root.find("voxel_dims")
+    voxel_z, voxel_y, voxel_x = abs(float(voxel_elem.attrib["D"])),abs(float(voxel_elem.attrib["V"])),abs(float(voxel_elem.attrib["H"]))
     n_max = max(int(root.find("dimensions").attrib.get("stack_columns")),int(root.find("dimensions").attrib.get("stack_rows"))) 
     list_tiff = list()
     dict_pos = {}
@@ -242,6 +301,7 @@ def stitch_dragonfly_tiles(
             enablePrint()
             logger.error(f"Error opening file {file}, at position {dict_pos[file]}:", e)
             traceback.print_exc(file=sys.stdout)
+    significantBits = 16 if img.dtype==np.uint16 else 8
     #######################################
     # Get Sizes, overlap
     #######################################
@@ -327,19 +387,23 @@ def stitch_dragonfly_tiles(
     #######################################
     # Flat-Field Correction
     #######################################
-    if flat_field_path is not None and flat_field_path!="":
-        logger.info("Performing Flat-Field Correction")
-        if flat_field_path.endswith("tiff") or flat_field_path.endswith("tif"):
-            flat_field_image = imread(flat_field_path)
-            while len(flat_field_image.shape)<len(dims):
-                flat_field_image = np.expand_dims(flat_field_image,axis=0)
-        elif file.endswith(".ims"):
-            blockPrint()
-            flat_field_image = ims(flat_field_path,squeeze_output=False)[:]
-            enablePrint()
-        flat_field_image = xr.DataArray(flat_field_image,dims=dims)
-        if max_project:
-            flat_field_image = flat_field_image.max("Z")
+    # if flat_field_path is not None and flat_field_path!="":
+    #     logger.info("Performing Flat-Field Correction")
+    #     if flat_field_path.endswith("tiff") or flat_field_path.endswith("tif"):
+    #         flat_field_image = imread(flat_field_path)
+    #         while len(flat_field_image.shape)<len(dims):
+    #             flat_field_image = np.expand_dims(flat_field_image,axis=0)
+    #     elif file.endswith(".ims"):
+    #         blockPrint()
+    #         flat_field_image = ims(flat_field_path,squeeze_output=False)[:]
+    #         enablePrint()
+    if False:
+        list_median = list_images.median(("X","Y"))
+        len(np.where(list_median > list_median.max()//3)[0])/len(list_images.stack_images)
+        flat_field_image = list_images.isel(stack_images = np.where(list_median > list_median.max()//1.5)[0]).max(dim = ('stack_images'))
+        #flat_field_image = xr.DataArray(flat_field_image,dims=dims)
+        # if max_project:
+        #     flat_field_image = flat_field_image.max("Z")
         flat_field_image = flat_field_image.squeeze()
         D_image = list_images.min("stack_images") # Background, D Image in Flat-Field Correction
         m = (flat_field_image - D_image).mean()
@@ -395,25 +459,32 @@ def stitch_dragonfly_tiles(
 
     logger.info("Stitching Done!")
     # Channel offset placeholder
-    if offset_channel is not None and 'Channel' in stitched.dims:
+    if offset_channel is not None and 'C' in stitched.dims:
         logger.info("Offsetting Channels")
         try:
             if isinstance(offset_channel, (int, float)):
                 # Shift all channels by the same amount along the Y and X dims
-                for ch in stitched.Channel.values:
+                for ch in stitched.C.values:
                     stitched.loc[dict(Channel=ch)] = stitched.sel(Channel=ch).shift(X=offset_channel, Y=offset_channel, fill_value=0)
-            elif hasattr(offset_channel, '__len__') and len(offset_channel) == stitched.sizes['Channel']:
-                for ch, shift_val in zip(stitched.Channel.values, offset_channel):
+            elif hasattr(offset_channel, '__len__') and len(offset_channel) == stitched.sizes['C']:
+                for ch, shift_val in zip(stitched.C.values, offset_channel):
                     stitched.loc[dict(Channel=ch)] = stitched.sel(Channel=ch).shift(X=shift_val, Y=shift_val, fill_value=0)
             else:
                 logger.error(
-                    f"Error: `offset_channel` is {offset_channel}, expected a scalar or a list of length {len(stitched.Channel)}"
+                    f"Error: `offset_channel` is {offset_channel}, expected a scalar or a list of length {len(stitched.C)}"
                 )
         except Exception as e:
             logger.error(f"Exception while shifting channels: {e}")
 
     logger.info("Cropping Empty tiles")
     stitched = crop_zero_borders(stitched)
+    # Reordering Axes to Match OME format
+    res = ''
+    for i,letter in enumerate(list("TCZYXS")):
+        if letter in stitched.dims:
+            res+=letter
+    stitched = stitched.transpose(*tuple(res))
+
     logger.info(f"Final array size is: {stitched.shape}")
     logger.info(f"Saving to {output_path}")
     # Save stitched image and thumbnail
@@ -424,11 +495,84 @@ def stitch_dragonfly_tiles(
             thumbnail =  thumbnail.max(dim)
     thumbnail = downscale_local_mean(thumbnail.to_numpy(),5)
     thumbnail = equalize_hist(thumbnail,mask=thumbnail>np.percentile(thumbnail,40))
-    thumbnail = rescale_intensity(thumbnail, in_range=(np.percentile(thumbnail,1),np.percentile(thumbnail,98)),out_range=np.uint16)
+    thumbnail = rescale_intensity(thumbnail, in_range=(np.percentile(thumbnail,1),np.percentile(thumbnail,98)),out_range=np.uint8)
     thumbnail_name = os.path.basename(xml_file).split('.')[0]
     plt.imsave(os.path.join(output_path, f"thumbnail_{thumbnail_name}.png"), thumbnail , cmap="gray")
-    if save_format == "tiff":
-        imwrite(os.path.join(output_path, f"{base_name}.tiff"), stitched)
+    if save_format == "tif":
+        # Prepare stitched data
+        axes = stitched.dims  # e.g. 'CYX'
+        stitched = stitched.astype(np.uint16)
+        data = stitched.transpose(*axes).to_numpy()
+        logger.info(f"{data.max()}")
+        logger.info(f"{data.shape}")
+        axes = "".join(axes)
+
+        logger.info(f"Image axes {axes}")
+        logger.info(f"Image shape {stitched.shape}")
+        logger.info(f"Image dtype {stitched.dtype}")
+        pixelsize = np.abs(voxel_x)  # assuming isotropic XY for simplicity
+
+        metadata = {
+            'axes': axes,
+            'SignificantBits': significantBits,
+            'PhysicalSizeX': np.abs(voxel_x),
+            'PhysicalSizeXUnit': 'um',
+            'PhysicalSizeY': np.abs(voxel_y),
+            'PhysicalSizeYUnit': 'um',
+            'PhysicalSizeZ': np.abs(voxel_z),
+            'PhysicalSizeZUnit': 'um',
+            'Description': 'Stitched multi-tile image with pyramidal levels',
+            'MapAnnotation': {  # for OMERO
+                'Namespace': 'openmicroscopy.org/PyramidResolution',
+                '1': f'{data.shape[0]//2} {data.shape[1]//2}',
+                '2': f'{data.shape[0]//4} {data.shape[1]//4}',
+                },
+        }
+        
+        ome_xml = build_ome_xml(
+            stitched=stitched,
+            voxel_x=np.abs(voxel_x),
+            voxel_y=np.abs(voxel_y),
+            voxel_z=np.abs(voxel_z),
+            significantBits=significantBits,
+            base_name=base_name
+        )
+
+        logger.info(f"Metadata is {metadata}")
+        # Pyramid parameters
+        subresolutions = 2
+        # options = dict(
+        #     tile=(tile_size//2, tile_size//2),
+        #     compression='jpeg',
+        #     resolutionunit='MICROMETER',
+        #     photometric='minisblack',
+        #     maxworkers=2
+        # )
+
+        ome_path = os.path.join(output_path, f"{base_name}.ome.tif")
+        with TiffWriter(ome_path, bigtiff=True) as tif:
+            tif.write(
+                data,
+                description=ome_xml,
+                subifds=subresolutions,
+                resolution=(1 / pixelsize, 1 / pixelsize),
+                metadata=metadata,
+            )
+
+            for level in range(subresolutions):
+                mag = 2 ** (level + 1)
+                down = data[..., ::mag, ::mag]
+                tif.write(
+                    down,
+                    description=ome_xml,
+                    subfiletype=1,
+                    resolution=(1 / mag / pixelsize, 1 / mag / pixelsize),
+                )
+
+            # Write thumbnail as a separate series
+            thumb_dims = tuple(i for i, ax in enumerate(stitched.dims) if ax not in ["X", "Y"])
+            thumbnail = (stitched.max(thumb_dims).to_numpy()[::8, ::8]>>2).astype('uint8')
+            tif.write(thumbnail, metadata={'Name': 'thumbnail'})
     elif save_format == "zarr":
         if attrs is not None:
             stitched.attrs.update(attrs)
@@ -465,8 +609,8 @@ def main():
         help="Full Path to the Flat Field Image to perform Flat Field Correction, leave empty to not perform it"
     )
     parser.add_argument(
-        "--dims", type=ast.literal_eval, default={"Cycle":0,"Channel":1,"Z":2,"X":3,"Y":4},
-        help='Dimension order of the input images (default: {"Cycle":0,"Channel":1,"Z":2,"X":3,"Y":4}).'
+        "--dims", type=ast.literal_eval, default={"T":0,"C":1,"Z":2,"X":3,"Y":4},
+        help='Dimension order of the input images (default: {"T":0,"C":1,"Z":2,"X":3,"Y":4}).'
     )
     parser.add_argument(
         "--attrs", type=ast.literal_eval, default=None,
@@ -477,8 +621,8 @@ def main():
         help="Use this as prefix for the tiles instead of the name from the metadata"
     )
     parser.add_argument(
-        "--save_format", type=str, choices=["tiff", "zarr"], default="tiff",
-        help="Output format (tiff or zarr)."
+        "--save_format", type=str, choices=["tif", "zarr"], default="tif",
+        help="Output format (tif or zarr)."
     )
     parser.add_argument(
         "--tile_size", type=int, default=None,

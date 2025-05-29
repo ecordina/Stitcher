@@ -87,6 +87,12 @@ def create_tiles_and_xml(
 
 
 # ---------- Test ----------
+# tile_shape,max_project,offset_channel = (10,512,512),False,None
+# background_subtraction = True
+# refine_overlap = True
+# save_format = "tif"
+# crop_overlap = True
+# max_overlap = False
 @pytest.mark.parametrize("tile_shape,max_project,offset_channel", [ ((64,64),False,None),   #{"X":3,"Y":4}),
                                                                     ((10,64,64),False,None),     #{"Z":2,"X":3,"Y":4}),
                                                                     ((10,64,64),True,None),      #{"Z":2,"X":3,"Y":4}),
@@ -107,7 +113,7 @@ def create_tiles_and_xml(
                                                                     ])
 @pytest.mark.parametrize("background_subtraction", [True, False])
 @pytest.mark.parametrize("refine_overlap", [True, False])
-@pytest.mark.parametrize("save_format", ["tiff",'zarr'])  # Add more formats if needed
+@pytest.mark.parametrize("save_format", ["tif",'zarr'])  # Add more formats if needed
 @pytest.mark.parametrize("crop_overlap,max_overlap", [(True,False), (False,True)])
 def test_stitch_args_combinations(
     tile_shape, max_project,
@@ -138,7 +144,7 @@ def test_stitch_args_combinations(
             max_overlap=max_overlap,
             crop_overlap=crop_overlap,
             disable_logger=True,
-            dims = {"Cycle":0,"Channel":1,"Z":2,"X":3,"Y":4},
+            dims = {"T":0,"C":1,"Z":2,"X":3,"Y":4},
             tile_size = None,
             refine_overlap = refine_overlap,
             offset_channel = offset_channel,
@@ -146,3 +152,8 @@ def test_stitch_args_combinations(
 
         assert list(tmp_path.glob("thumbnail*.png")), "Expected thumbnail not created"
         assert list(tmp_path.glob(f"*.{save_format}")), f"Expected {save_format} not created"
+# test_stitch_args_combinations(
+#     tile_shape, max_project,
+#     background_subtraction, save_format,
+#     max_overlap, crop_overlap,refine_overlap,offset_channel
+# )

@@ -6,11 +6,11 @@
 
 # Arguments
 FOLDER=""
-XML_FILE="Z:\FusionImages\2025-05-06\MP_2025410_E18-F2_14.03.23.xml"
+XML_FILE="/gpfs/commons/home/ecordina/ecordina_innovation/dragonfly_stitching/old/2025-04-11/ims/MP_Chao_250415-F1_cs_13.31.15.xml"
 
 # Default Arguments
 OUTPUT_PATH="./data/output"        # Folder where to save the output
-SAVE_FORMAT="tiff" 		   # Default to 'tiff' if not specified, accepts tiff and zarrs
+SAVE_FORMAT="tif" 		   # Default to 'tif' if not specified, accepts tif and zarrs
 
 # Optional flags
 IMAGE_PREFIX="" 		   # In case the image prefix is different than the one in the metadata /!\, has to be complete as the code will look for image_prefix+"^_F\d+$"
