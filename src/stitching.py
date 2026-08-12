@@ -1,6 +1,8 @@
 import logging
 import sys
+import re
 from skimage.exposure import rescale_intensity,equalize_hist
+from skimage.filters import gaussian
 import argparse
 from os import path
 from skimage.registration import phase_cross_correlation
@@ -18,7 +20,9 @@ from imaris_ims_file_reader.ims import ims
 import traceback
 import ast
 import datetime
-
+import numpy as np
+import re
+from scipy.spatial import cKDTree
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -131,8 +135,86 @@ def crop_zero_borders(image: xr.DataArray) -> xr.DataArray:
     return image.isel(X=slice(x_start, x_end), Y=slice(y_start, y_end))
 
 
-    
+def extract_scene_id(filename):
+    match = re.search(r"s(\d+)", filename)
+    return match.group(1) if match else "0"
 
+def parse_xy(filename):
+    """
+    Extract x/y grid coordinates from filenames like:
+    Fibres_b0s51z2c1x64222-1392y4914-1040m25.tiff
+    """
+    m = re.search(r"x(\d+)-\d+y(\d+)-\d+m(\d+)", filename)
+    if not m:
+        return None
+    x = int(m.group(1))
+    y = int(m.group(2))
+    return x, y
+
+def get_frame_step(xml_file):
+    import xml.etree.ElementTree as ET
+
+    root = ET.parse(xml_file).getroot()
+    text = root.find('Tags').find('DetectorState').text
+    text = text[text.find('<Frame>')+len("<Frame>"):text.find('</Frame>')].split(',')
+    _, _, w, h = map(int, text)
+
+    step_x_px = int(0.90 * w)
+    step_y_px = int(0.90 * h)
+
+    return w, h, step_x_px, step_y_px
+
+def group_by_spacing(files,xml_file):
+    coords = {}
+
+    for f in files:
+        xy = parse_xy(f)
+        if xy is not None:
+            coords[f] = xy
+
+    if len(coords) == 0:
+        return []
+
+    _,_, dx_ref, dy_ref = get_frame_step(xml_file)
+    print('REF: ',dx_ref,dy_ref)
+    tx = dx_ref
+    ty = dy_ref
+
+    def is_neighbor(p1, p2, dx, dy):
+        x1, y1 = p1
+        x2, y2 = p2
+
+        return (
+            abs(x1 - x2) <= 1.1 * dx and
+            abs(y1 - y2) <= 1.1 * dy
+        )
+
+    visited = set()
+    groups = []
+
+    items = list(coords.keys())
+
+    for f in items:
+        if f in visited:
+            continue
+
+        stack = [f]
+        group = []
+
+        while stack:
+            cur = stack.pop()
+            if cur in visited:
+                continue
+            visited.add(cur)
+            group.append(cur)
+
+            for f2 in items:
+                if f2 not in visited and is_neighbor(coords[cur], coords[f2], tx, ty):
+                    stack.append(f2)
+
+        groups.append(group)
+
+    return groups
 
 def stitch_dragonfly_tiles(
     folder: Optional[str] = None,
@@ -147,12 +229,17 @@ def stitch_dragonfly_tiles(
     image_prefix: Optional[str] = "",
     overlap: Optional[int|str] = None,
     refine_overlap: Optional[bool] = None,
-    max_overlap: bool = False,
-    crop_overlap: bool = False,
+    overlap_mode: str = "blend",
     offset_channel: Optional[np.ndarray] = None,
     disable_logger: Optional[bool] = False,
     attrs: Optional[dict] = None,
+    metadata_format: str = "dragonfly",
+    gaussian_sigma: float = 0.0,
+    normalize_intensity: bool = False,
+    split_by_scene: bool = False,              
+    selected_files: Optional[list] = None,     
 ) -> None:
+
     """
     Stitch tiled TIFF images from Dragonfly output using positions defined in an XML file.
 
@@ -183,14 +270,24 @@ def stitch_dragonfly_tiles(
         Overlap in pixels between adjacent tiles. If None, inferred from metadata.
     refine_overlap : bool, optional
         Whether to refine the overlap using correlation, by default None.
-    max_overlap : bool, optional
-        Use max intensity blending in the overlap regions, by default True.
-    crop_overlap : bool, optional
-        Use hard cropping to remove overlap regions, by default False.
+    overlap_mode : str, optional
+        Stitching mode for overlap regions ('max', 'mean', 'crop', or 'blend'), by default 'blend'.
     offset_channel : np.ndarray, optional
         Placeholder for per-channel offset corrections. Not implemented yet.
     disable_logger: bool, optional
         Set True to disable Logging
+    attrs : dict, optional
+        Attributes to save with the image.
+    metadata_format : str, optional
+        Format of the metadata, either "dragonfly" or "zeiss_zen".
+    gaussian_sigma : float, optional
+        Sigma for Gaussian filtering at the end of stitching, by default 0.0 (disabled).
+    normalize_intensity : bool, optional
+        Whether to normalize intensity level across tiles, by default False.
+    split_by_scene : bool, optional
+        Whether to split the stitching process by scene, by default False.
+    selected_files : list, optional
+        List of files to stitch, if None, all files will be stitched.
 
     Raises
     ------
@@ -227,28 +324,38 @@ def stitch_dragonfly_tiles(
         # Add the handlers to the logger
         logger.addHandler(file_handler)
         logger.addHandler(console_handler)
+
     if (xml_file is None or xml_file=="") and (folder is None or folder==""):
         raise ValueError("At least one of xml_file or folder must be given")
+
     if (folder is None or folder==""):
         logger.info("Folder is None and XML file is given, assuming the tiles are in the same folder as the xml")
         folder = os.path.dirname(xml_file)+"/"
+
     if (xml_file is None or xml_file==""):
         logger.warning(r"XML file is None and Folder is given, assuming the xml is in the same folder as the tiles and\n /!\ /!\ assuming that there is only one xml file in it (One Experiment) /!\/!\ ")
         xml_file = [os.path.join(folder,f) for f in os.listdir(folder) if f.endswith("xml")][0]
         logger.info(f"Using {os.path.basename(xml_file)}")
+
     if save_format not in ("tif", "zarr"):
         raise ValueError("save_format must be 'tif' or 'zarr'")
 
-    list_tiff = sorted([f for f in os.listdir(folder) if f.endswith("tiff") or f.endswith("tif") or f.endswith("ims")])
+    all_files = sorted([f for f in os.listdir(folder) if f.endswith(("tiff","tif","ims"))])
+
+    if selected_files is not None:
+        list_tiff = [f for f in all_files if f in selected_files]
+    else:
+        list_tiff = all_files
+
+
     if not list_tiff:
         raise FileNotFoundError("No TIFF or IMS files found in the folder.")
-    if not ((max_overlap and not crop_overlap) or (not max_overlap and crop_overlap)):
-        if (not max_overlap and not crop_overlap):
-            logger.info("No Stitching method given, defaulting to Crop Overlap")
-        else:
-            logger.error("Both Stitching Method were chosen, only one is accepted!")
-            raise valueError("Both Stitching Method were chosen, only one is accepted!")
-    logger.info("Using Crop Overlap" if crop_overlap else "Using Max Projection Overlap" )
+
+
+    if overlap_mode not in ("max", "mean", "crop", "blend"):
+        logger.error(f"Invalid overlap_mode '{overlap_mode}'. Choosing 'blend' instead.")
+        overlap_mode = "blend"
+    logger.info(f"Using Overlap Mode: {overlap_mode}")
 
     # Disable
     def blockPrint():
@@ -259,20 +366,135 @@ def stitch_dragonfly_tiles(
 
     # Parse positions from XML
     root = ET.parse(xml_file).getroot()
-    voxel_elem = root.find("voxel_dims")
-    voxel_z, voxel_y, voxel_x = abs(float(voxel_elem.attrib["D"])),abs(float(voxel_elem.attrib["V"])),abs(float(voxel_elem.attrib["H"]))
-    n_max = max(int(root.find("dimensions").attrib.get("stack_columns")),int(root.find("dimensions").attrib.get("stack_rows"))) 
-    list_tiff = list()
-    dict_pos = {}
-    for stack in root.findall(".//Stack"):
-        file_name = stack.attrib.get("IMG_REGEX")
-        if image_prefix!="":
-            file_name = image_prefix+file_name[-9:]
-        y = n_max  - int(stack.attrib.get("ROW"))
-        x = n_max  - int(stack.attrib.get("COL"))
-        dict_pos[file_name] = [y, x]
-        list_tiff.append(file_name)
-    logger.info(f"Found {len(list_tiff)} tiles for experiment {os.path.basename(xml_file)[:-4]}")
+    
+    if metadata_format == "zeiss_zen":
+        logger.info("Using Zeiss Zen Metadata Format")
+        # Automatic folder detection for Zen
+        if folder is not None:
+            # Normalize folder path for comparison
+            norm_folder = os.path.normpath(folder)
+            norm_xml_dir = os.path.normpath(os.path.dirname(xml_file))
+            if norm_folder == norm_xml_dir:
+                potential_folder = xml_file.replace("_metadata.xml", "_files")
+                if os.path.isdir(potential_folder):
+                    folder = potential_folder
+                    logger.info(f"Detected Zen folder: {folder}")
+
+        # Extract voxel dimensions from Zen Scaling
+        scaling = root.find(".//Scaling/Items")
+        if scaling is not None:
+            try:
+                vx_node = scaling.find("Distance[@Id='X']/Value")
+                vy_node = scaling.find("Distance[@Id='Y']/Value")
+                voxel_x = float(vx_node.text) * 1e6 if vx_node is not None else 1.0
+                voxel_y = float(vy_node.text) * 1e6 if vy_node is not None else 1.0
+                voxel_z = 1.0 # Default
+                logger.info(f"Voxel size found in Zen XML: {voxel_x}x{voxel_y}x{voxel_z} um")
+            except Exception as e:
+                logger.warning(f"Could not parse voxel sizes from Zen XML: {e}. Using defaults.")
+                voxel_z, voxel_y, voxel_x = 1.0, 1.0, 1.0
+        else:
+            voxel_z, voxel_y, voxel_x = 1.0, 1.0, 1.0
+            
+        list_tiff_all = sorted([f for f in os.listdir(folder) if (f.endswith("tiff") or f.endswith("tif")) and "metadata" not in f])
+        if selected_files is not None:
+            list_tiff_all = [f for f in list_tiff_all if f in selected_files]
+        list_tiff = []
+        dict_pos = {}
+        # Pattern: ..._b<B>s<S>[z<Z>]c<C>x<X>-<W>y<Y>-<H>m<M>.tiff
+        zen_pattern = re.compile(r".*_b\d+s\d+(?:z(\d+))?c(\d+)x(\d+)-(\d+)y(\d+)-(\d+)m(\d+)\.tiff")
+        
+        # Try to extract target Z from XML filename if it follows the pattern
+        target_z = None
+        xml_name = os.path.basename(xml_file)
+        xml_match = zen_pattern.search(xml_name)
+        if xml_match and xml_match.group(1) is not None:
+            target_z = xml_match.group(1)
+            logger.info(f"Target Z-plane from XML: {target_z}")
+
+        max_px_x = 0
+        max_px_y = 0
+        channels = set()
+        for file_name in list_tiff_all:
+            match = zen_pattern.search(file_name)
+            if match:
+                z_val = match.group(1)
+                # If we have a target Z, filter out other planes
+                if target_z is not None and z_val != target_z:
+                    continue
+                
+                # Group indices shift if Z is present (z=1, c=2, x=3, w=4, y=5, h=6)
+                c = int(match.group(2))
+                x_start = int(match.group(3))
+                width = int(match.group(4))
+                y_start = int(match.group(5))
+                height = int(match.group(6))
+                
+                dict_pos[file_name] = [y_start, x_start, c, height, width] # Absolute pixel positions + channel + extent
+                list_tiff.append(file_name)
+                channels.add(c)
+                max_px_x = max(max_px_x, x_start + width)
+                max_px_y = max(max_px_y, y_start + height)
+        
+        num_channels = len(channels)
+        n_max = 0 # Not used for absolute positioning calculation of total size
+        # We will use max_px_x, max_px_y later
+        actual_size = 1 
+        # overlap = 0
+        logger.info(f"Found {len(list_tiff)} tiles ({num_channels} channels) for experiment {os.path.basename(xml_file)}")
+    else:
+        # Dragonfly Metadata
+        voxel_elem = root.find("voxel_dims")
+        voxel_z, voxel_y, voxel_x = abs(float(voxel_elem.attrib["D"])),abs(float(voxel_elem.attrib["V"])),abs(float(voxel_elem.attrib["H"]))
+        n_max = max(int(root.find("dimensions").attrib.get("stack_columns")),int(root.find("dimensions").attrib.get("stack_rows"))) 
+        list_tiff = list()
+        dict_pos = {}
+        # We'll infer tile_size later, but for now we need a placeholder if we use consistent indexing
+        for stack in root.findall(".//Stack"):
+            file_name = stack.attrib.get("IMG_REGEX")
+            if image_prefix!="":
+                file_name = image_prefix+file_name[-9:]
+            y = n_max  - int(stack.attrib.get("ROW"))
+            x = n_max  - int(stack.attrib.get("COL"))
+            dict_pos[file_name] = [y, x, 0, None, None] # Extent None for now
+            list_tiff.append(file_name)
+        logger.info(f"Found {len(list_tiff)} tiles for experiment {os.path.basename(xml_file)[:-4]}")
+
+    if split_by_scene:
+        logger.info("Grouping tiles using dx/dy tolerance clustering")
+
+        groups = group_by_spacing(list_tiff,xml_file)
+
+        logger.info(f"Found {len(groups)} spatial groups")
+
+        for i, files in enumerate(groups):
+            logger.info(f"Processing group {i} with {len(files)} tiles")
+
+            stitch_dragonfly_tiles(
+                folder=folder,
+                xml_file=xml_file,
+                output_path=os.path.join(output_path, f"group_{i}"),
+                max_project=max_project,
+                background_subtraction=background_subtraction,
+                flat_field_path=flat_field_path,
+                dims=dims,
+                save_format=save_format,
+                tile_size=tile_size,
+                image_prefix=image_prefix,
+                overlap=overlap,
+                refine_overlap=refine_overlap,
+                overlap_mode=overlap_mode,
+                offset_channel=offset_channel,
+                disable_logger=disable_logger,
+                attrs=attrs,
+                metadata_format=metadata_format,
+                gaussian_sigma=gaussian_sigma,
+                normalize_intensity=normalize_intensity,
+                split_by_scene=False,
+                selected_files=files,
+            )
+
+        return
     #######################################
     # Open All Images 
     # #######################################
@@ -281,50 +503,99 @@ def stitch_dragonfly_tiles(
     f_name = f"Loading {os.path.basename(xml_file).split('.')[0]} Images"
     for file in tqdm(list_tiff,desc=f_name):
         try:
+            path_img = os.path.join(folder, file)
             if file.endswith(".tiff") or file.endswith(".tif"):
-                img = imread(os.path.join(folder, file))
-                while len(img.shape)<len(dims):
-                    img = np.expand_dims(img,axis=0)
+                img_raw = imread(path_img)
             elif file.endswith(".ims"):
                 blockPrint()
-                img = ims(os.path.join(folder, file),squeeze_output=False)[:]
+                img_raw = ims(path_img,squeeze_output=False)[:]
                 enablePrint()
             else:
                 logger.error(f"Error opening file {file}, at position {dict_pos[file]}\nSupported format are TIFF and IMS, file ends in {file.split('.')[-1]}")
-            img = xr.DataArray(img,dims=dims)
-            z_stack = len(img.Z)
-            if max_project:
-                img = img.max("Z")
-            img = img.squeeze()
+                continue
+            
+            if metadata_format == "zeiss_zen":
+                # Zeiss Zen Exported tiles are typically 2D (Y, X) or 3D (C, Y, X)
+                # We squeeze to remove singleton dimensions
+                img = np.squeeze(img_raw)
+                if len(img.shape) == 3:
+                    # Max project if it has a channel/singleton dim
+                    # We assume Y and X are the large ones
+                    if img.shape[0] < img.shape[1] and img.shape[0] < img.shape[2]:
+                        img = np.max(img, axis=0)
+                    elif img.shape[2] < img.shape[0] and img.shape[2] < img.shape[1]:
+                        img = np.max(img, axis=2)
+                img = xr.DataArray(img, dims=["Y", "X"])
+            else:
+                img = img_raw
+                # Dragonfly: Expand dims to match dims parameter
+                while len(img.shape)<len(dims):
+                    img = np.expand_dims(img,axis=0)
+                img = xr.DataArray(img, dims=dims)
+                if max_project:
+                    img = img.max("Z")
+                img = img.squeeze()
+            
             list_images.append(img)
         except Exception as e:
             enablePrint()
             logger.error(f"Error opening file {file}, at position {dict_pos[file]}:", e)
             traceback.print_exc(file=sys.stdout)
-    significantBits = 16 if img.dtype==np.uint16 else 8
+    if not list_images:
+        logger.error(f"No images loaded for {xml_file}. Please check the folder and regex.")
+        return
+    img = list_images[0]
+    significantBits = img.to_numpy().itemsize*8
+    logger.info(f"{significantBits} Significant Bits")
     #######################################
     # Get Sizes, overlap
     #######################################
     if tile_size is None:
-        tile_size = len(list_images[0].X)
-        logger.info(f"Tile size is: {tile_size}")
-    # Getting Overlap from XML
-    if overlap is None or overlap=='':
+        tile_size_x = int(list_images[0].sizes["X"])
+        tile_size_y = int(list_images[0].sizes["Y"])
+    else:
+        tile_size_x = tile_size_y = tile_size
+    logger.info(f"Tile size is: {tile_size_x}x{tile_size_y}")
+
+    # Getting Overlap
+    overlap_x = overlap_y = 0
+    if overlap is not None and isinstance(overlap, str) and overlap.endswith("%"):
+        try:
+            percentage = float(overlap.strip('%'))
+            overlap_x = int(tile_size_x * percentage / 100)
+            overlap_y = int(tile_size_y * percentage / 100)
+            logger.info(f"Calculated overlap from percentage: X={overlap_x} px, Y={overlap_y} px ({percentage}%)")
+        except ValueError:
+            logger.warning(f"Could not parse overlap percentage '{overlap}'. Using default.")
+    elif overlap is not None and overlap != '':
+        overlap_x = overlap_y = int(overlap)
+
+    if metadata_format == "zeiss_zen":
+        actual_size_x = actual_size_y = 1
+    elif overlap is None or overlap=='':
+        actual_size_val = tile_size_x # Default
         for stack in root.findall(".//Stack"):
             if stack.attrib.get("COL")=="1":
-                actual_size = int(stack.attrib.get("ABS_H"))
-                logger.info(f"Actual size is: {actual_size}")
+                actual_size_val = int(stack.attrib.get("ABS_H"))
                 break
-        overlap = tile_size-actual_size
-        logger.info(f"Overlap Found in XML to be {overlap} px")
+        actual_size_x = actual_size_y = actual_size_val
+        overlap_x = tile_size_x - actual_size_x
+        overlap_y = tile_size_y - actual_size_y
+        logger.info(f"Overlap Found in XML: X={overlap_x} px, Y={overlap_y} px")
     else:
-        if type(overlap)==str:
-            overlap = int(overlap)
-        logger.info(f"Using Given Overlap {overlap} px")
-        actual_size = tile_size - overlap
+        actual_size_x = tile_size_x - overlap_x
+        actual_size_y = tile_size_y - overlap_y
+        logger.info(f"Using Overlap: X={overlap_x} px, Y={overlap_y} px")
+    
+    # Fill in extents for Dragonfly if they were None
+    for key in dict_pos:
+        if dict_pos[key][3] is None:
+            dict_pos[key][3] = tile_size_y
+            dict_pos[key][4] = tile_size_x
+
     # Refining Overlap
     list_images = xr.concat(list_images,'stack_images')
-    if refine_overlap:
+    if refine_overlap and metadata_format != "zeiss_zen":
         logger.info("Refining Overlap")
         one = two = None
         tile_variances = list_images.var(dim=[dim for dim in list_images.dims if dim!="stack_images"])
@@ -369,14 +640,17 @@ def stitch_dragonfly_tiles(
                 enablePrint()
                 logger.error(f"Error opening file {file}, at position {dict_pos[file]}:", e)
                 traceback.print_exc(file=sys.stdout)
-        for i in range(int(overlap//100)+1,10):
-            test = find_translation(test_images[0].sel(X=slice(0,i*100)).data,test_images[1].sel(X=slice(-i*100,tile_size)).data)
+        for i in range(int(overlap_x//100)+1,10):
+            test = find_translation(test_images[0].sel(X=slice(0,i*100)).data,test_images[1].sel(X=slice(-i*100,tile_size_x)).data)
             if (test!=0).any():
                 if int(i*100-np.max(np.abs(test)))>0:
-                    overlap = int(i*100-np.max(np.abs(test)))
+                    overlap_x = overlap_y = int(i*100-np.max(np.abs(test)))
                     break
-        actual_size = tile_size - overlap
-        logger.info(f"Using An Overlap of {overlap} px")
+        actual_size_x = tile_size_x - overlap_x
+        actual_size_y = tile_size_y - overlap_y
+        logger.info(f"Using Refined Overlap: X={overlap_x} px, Y={overlap_y} px")
+    elif refine_overlap and metadata_format == "zeiss_zen":
+        logger.warning("Refine overlap is not currently supported for Zeiss Zen format. Skipping.")
     #######################################
     # Background Substraction
     #######################################
@@ -384,80 +658,237 @@ def stitch_dragonfly_tiles(
         logger.info("Substracting Background")
         D_image = list_images.min("stack_images") # Background
         list_images = list_images - D_image
+    
     #######################################
     # Flat-Field Correction
     #######################################
-    # if flat_field_path is not None and flat_field_path!="":
-    #     logger.info("Performing Flat-Field Correction")
-    #     if flat_field_path.endswith("tiff") or flat_field_path.endswith("tif"):
-    #         flat_field_image = imread(flat_field_path)
-    #         while len(flat_field_image.shape)<len(dims):
-    #             flat_field_image = np.expand_dims(flat_field_image,axis=0)
-    #     elif file.endswith(".ims"):
-    #         blockPrint()
-    #         flat_field_image = ims(flat_field_path,squeeze_output=False)[:]
-    #         enablePrint()
-    if False:
-        list_median = list_images.median(("X","Y"))
-        len(np.where(list_median > list_median.max()//3)[0])/len(list_images.stack_images)
-        flat_field_image = list_images.isel(stack_images = np.where(list_median > list_median.max()//1.5)[0]).max(dim = ('stack_images'))
-        #flat_field_image = xr.DataArray(flat_field_image,dims=dims)
-        # if max_project:
-        #     flat_field_image = flat_field_image.max("Z")
-        flat_field_image = flat_field_image.squeeze()
-        D_image = list_images.min("stack_images") # Background, D Image in Flat-Field Correction
-        m = (flat_field_image - D_image).mean()
-        G_image = m / (flat_field_image - D_image)
-        list_images = (list_images - D_image) * G_image
-    #######################################
+    if flat_field_path is not None and flat_field_path!="":
+        logger.info("Performing Flat-Field Correction")
+        try:
+            if flat_field_path.endswith("tiff") or flat_field_path.endswith("tif"):
+                ff_raw = imread(flat_field_path)
+            elif flat_field_path.endswith("ims"):
+                blockPrint()
+                ff_raw = ims(flat_field_path, squeeze_output=False)[:]
+                enablePrint()
+            else:
+                logger.error(f"Flat-field format not supported: {flat_field_path}")
+                ff_raw = None
+
+            if ff_raw is not None:
+                if metadata_format == "zeiss_zen":
+                    ff_img = np.squeeze(ff_raw)
+                    if len(ff_img.shape) == 3:
+                        if ff_img.shape[0] < ff_img.shape[1] and ff_img.shape[0] < ff_img.shape[2]:
+                            ff_img = np.max(ff_img, axis=0)
+                        elif ff_img.shape[2] < ff_img.shape[0] and ff_img.shape[2] < ff_img.shape[1]:
+                            ff_img = np.max(ff_img, axis=2)
+                    flat_field_image = xr.DataArray(ff_img, dims=["Y", "X"])
+                else:
+                    ff_img = ff_raw
+                    while len(ff_img.shape) < len(dims):
+                        ff_img = np.expand_dims(ff_img, axis=0)
+                    flat_field_image = xr.DataArray(ff_img, dims=dims)
+                    if max_project:
+                        flat_field_image = flat_field_image.max("Z")
+                    flat_field_image = flat_field_image.squeeze()
+
+                # Perform Correcton: Corrected = (Raw - Dark) * Mean(Flat - Dark) / (Flat - Dark)
+                D_image = list_images.min("stack_images") # Background/Dark Image
+                
+                # Ensure we don't divide by zero or negative values
+                illumination = (flat_field_image - D_image).clip(min=1)
+                m = illumination.mean()
+                G_image = m / illumination
+                
+                logger.info("Applying Flat-Field Correction to tiles")
+                list_images = (list_images - D_image) * G_image
+                # Ensure no negative values or overflows before casting back to uint16 later
+                list_images = list_images.clip(min=0)
+                
+        except Exception as e:
+            enablePrint()
+            logger.error(f"Error during Flat-Field Correction: {e}")
+            traceback.print_exc(file=sys.stdout)
+
+    if normalize_intensity:
+        logger.info("Normalizing intensity across tiles")
+        try:
+            # list_images has dims ('stack_images', 'C', 'Y', 'X') or similar
+            if "C" in list_images.dims:
+                for c in list_images.C:
+                    # Calculate median for each tile in this channel
+                    tile_medians = list_images.sel(C=c).median(dim=("X", "Y"))
+                    # Filter out very dark/empty tiles to avoid extreme scaling
+                    valid_medians = tile_medians.values[tile_medians.values > 5] 
+                    if len(valid_medians) > 0:
+                        target_median = np.mean(valid_medians)
+                        logger.debug(f"Channel {c.item()} medians range: {tile_medians.min().item():.1f} - {tile_medians.max().item():.1f}, target: {target_median:.1f}")
+                        # Scale factor: target / current
+                        # Use clip on tile_medians to avoid div by zero
+                        scale_factors = target_median / tile_medians.where(tile_medians > 1, 1)
+                        # Multiply tile-wise
+                        list_images.loc[dict(C=c)] = (list_images.sel(C=c) * scale_factors).clip(min=0, max=65535)
+            else:
+                tile_medians = list_images.median(dim=("X", "Y"))
+                valid_medians = tile_medians.values[tile_medians.values > 5]
+                if len(valid_medians) > 0:
+                    target_median = np.mean(valid_medians)
+                    logger.debug(f"Medians range: {tile_medians.min().item():.1f} - {tile_medians.max().item():.1f}, target: {target_median:.1f}")
+                    scale_factors = target_median / tile_medians.where(tile_medians > 1, 1)
+                    list_images = (list_images * scale_factors).clip(min=0, max=65535)
+        except Exception as e:
+            logger.error(f"Error during intensity normalization: {e}")
+            traceback.print_exc(file=sys.stdout)
     # Create Empty Tiled Image
-    #######################################
     dims_final = dict()
-    for dim in list_images.dims:
-        if dim not in ["X","Y","stack_images"]:
-            dims_final[dim] = len(list_images[dim])
-    dims_final["X"] = tile_size * (n_max+1)
-    dims_final["Y"] = tile_size * (n_max+1)
-    stitched = xr.DataArray(np.zeros(list(dims_final.values())),dims=list(dims_final.keys()))
-    #######################################
-    # Cropping Stitch
-    #######################################
-
-    if crop_overlap:
-        f_name = f"Stitching {os.path.basename(xml_file).split('.')[0]} Images"
-        for i in tqdm(range(len(list_images.stack_images)),desc=f_name):
-            x_pos, y_pos = dict_pos[list_tiff[i]]
-            begin_tile_x = actual_size * x_pos
-            begin_tile_y = actual_size * y_pos
-            end_tile_x = begin_tile_x+actual_size
-            end_tile_y = begin_tile_y+actual_size
-            stitched.loc[dict(X=slice(begin_tile_x, end_tile_x), Y= slice(begin_tile_y, end_tile_y))] = list_images.sel(stack_images=i,X=slice(0,actual_size),Y=slice(0,actual_size))
-        
-    #######################################
-    # Max Overlap Stitch
-    #######################################
+    if metadata_format == "zeiss_zen":
+        # Force OME order C, Y, X
+        dims_final = {"C": num_channels, "Y": max_px_y, "X": max_px_x}
     else:
-        f_name = f"Stitching {os.path.basename(xml_file).split('.')[0]} Images"
-        for i in tqdm(range(len(list_images.stack_images)),desc=f_name):
-            x_pos, y_pos = dict_pos[list_tiff[i]]
-            begin_tile_x = actual_size * x_pos
-            begin_tile_y = actual_size * y_pos
-            end_tile_x = begin_tile_x+tile_size
-            end_tile_y = begin_tile_y+tile_size
-            # Center [overlap:-overlap]
-            stitched.loc[dict(X=slice(begin_tile_x+overlap, end_tile_x-overlap), Y=slice(begin_tile_y+overlap, end_tile_y-overlap))] = list_images.sel(stack_images=i,X=slice(overlap,-overlap),Y=slice(overlap,-overlap))
+        for dim in list_images.dims:
+            if dim not in ["X","Y","stack_images"]:
+                dims_final[dim] = len(list_images[dim])
+        dims_final["Y"] = tile_size_y * (n_max + 1)
+        dims_final["X"] = tile_size_x * (n_max + 1)
+    
+    # Use float32 for blend mode to avoid rounding errors during accumulation
+    if overlap_mode == "blend":
+        stitched = xr.DataArray(np.zeros(list(dims_final.values()), dtype=np.float32), dims=list(dims_final.keys()), name="stitched")
+        weights = xr.DataArray(np.zeros(list(dims_final.values()), dtype=np.float32), dims=list(dims_final.keys()), name="weights")
+    else:
+        # Use uint16 to save memory and avoid float64 default
+        stitched = xr.DataArray(np.zeros(list(dims_final.values()), dtype=np.uint16), dims=list(dims_final.keys()), name="stitched")
+    
+    # Mapping dims to indices for stitched.values positional updates
+    dim_to_idx = {dim: i for i, dim in enumerate(stitched.dims)}
+    
+    def update_stitched_pos(target_isel_dict, source_isel_dict, tile_idx, mode="set", weight_mask=None):
+        """Position-based update of the stitched array using raw numpy access."""
+        indices = [slice(None)] * stitched.ndim
+        for d, s in target_isel_dict.items():
+            if d in dim_to_idx:
+                indices[dim_to_idx[d]] = s
+        indices = tuple(indices)
+        
+        # Get source tile and ensure it's squeezed to matching 2D/3D shape
+        tile_data = list_images.isel(stack_images=tile_idx, **source_isel_dict).values
+        
+        if mode == "set":
+            stitched.values[indices] = tile_data
+        elif mode == "max":
+            if tile_data.size > 0:
+                stitched.values[indices] = np.maximum(stitched.values[indices], tile_data)
+        elif mode == "mean":
+            if tile_data.size > 0:
+                stitched.values[indices] = np.mean(np.stack([stitched.values[indices], tile_data]), axis=0)
+        elif mode == "blend":
+            if tile_data.size > 0 and weight_mask is not None:
+                # Add weights for broadcasting: mask is (Y, X), tile_data might be (C, Y, X)
+                if tile_data.ndim > weight_mask.ndim:
+                    weight_mask = np.expand_dims(weight_mask, axis=0)
+                
+                stitched.values[indices] += (tile_data * weight_mask).astype(np.float32)
+                weights.values[indices] += weight_mask.astype(np.float32)
 
+    #######################################
+    # Stitching 
+    #######################################
+    f_name = f"Stitching {os.path.basename(xml_file).split('.')[0]} Images"
+    
+    for i in tqdm(range(len(list_images.stack_images)), desc=f_name):
+        y_pos, x_pos, c_pos, h_tile, w_tile = dict_pos[list_tiff[i]]
+        begin_tile_x = actual_size_x * x_pos
+        begin_tile_y = actual_size_y * y_pos
+        
+        if overlap_mode == "crop":
+            # Zen uses absolute positions, Dragonfly uses index positions
+            step_x = w_tile if metadata_format=="zeiss_zen" else actual_size_x
+            step_y = h_tile if metadata_format=="zeiss_zen" else actual_size_y
+            
+            target_isel = dict(X=slice(begin_tile_x, begin_tile_x + step_x), 
+                               Y=slice(begin_tile_y, begin_tile_y + step_y))
+            if "C" in stitched.dims:
+                target_isel["C"] = c_pos
+            
+            source_isel = dict(X=slice(0, step_x), Y=slice(0, step_y))
+            update_stitched_pos(target_isel, source_isel, i, mode="set")
+        
+        elif overlap_mode == "blend":
+            # Feathered blending with linear ramps
+            end_tile_x = begin_tile_x + w_tile
+            end_tile_y = begin_tile_y + h_tile
+            
+            # Create weight mask for this tile
+            mask_y = np.ones(h_tile, dtype=np.float32)
+            if overlap_y > 0:
+                ramp_y = np.linspace(0, 1, overlap_y, dtype=np.float32)
+                mask_y[:overlap_y] = ramp_y
+                mask_y[-overlap_y:] = ramp_y[::-1]
+            
+            mask_x = np.ones(w_tile, dtype=np.float32)
+            if overlap_x > 0:
+                ramp_x = np.linspace(0, 1, overlap_x, dtype=np.float32)
+                mask_x[:overlap_x] = ramp_x
+                mask_x[-overlap_x:] = ramp_x[::-1]
+                
+            weight_mask = mask_y[:, np.newaxis] * mask_x[np.newaxis, :]
+            
+            target_isel = dict(X=slice(begin_tile_x, end_tile_x), 
+                               Y=slice(begin_tile_y, end_tile_y))
+            if "C" in stitched.dims:
+                target_isel["C"] = c_pos
+            
+            source_isel = dict(X=slice(0, w_tile), Y=slice(0, h_tile))
+            update_stitched_pos(target_isel, source_isel, i, mode="blend", weight_mask=weight_mask)
+            
+        else:
+            # Max/Mean Blending
+            end_tile_x = begin_tile_x + w_tile
+            end_tile_y = begin_tile_y + h_tile
+            
+            # Center [overlap: -overlap]
+            center_x = slice(begin_tile_x + overlap_x, end_tile_x - overlap_x)
+            center_y = slice(begin_tile_y + overlap_y, end_tile_y - overlap_y)
+            
+            if center_x.start < center_x.stop and center_y.start < center_y.stop:
+                target_isel = dict(X=center_x, Y=center_y)
+                if "C" in stitched.dims:
+                    target_isel["C"] = c_pos
+                
+                source_isel = dict(X=slice(overlap_x, w_tile - overlap_x), 
+                                   Y=slice(overlap_y, h_tile - overlap_y))
+                update_stitched_pos(target_isel, source_isel, i, mode=overlap_mode)
 
-            # Left [:overlap,:]
-            stitched.loc[dict(X=slice(begin_tile_x, begin_tile_x+overlap), Y=slice(begin_tile_y,end_tile_y))]  = xr.concat(([list_images.sel(stack_images=i,X=slice(0,overlap))          , stitched.sel(X=slice(begin_tile_x ,begin_tile_x+overlap), Y=slice(begin_tile_y,end_tile_y))]),dim="max").max("max")
-            # Right [:,-overlap:]
-            stitched.loc[dict(X=slice(end_tile_x-overlap,end_tile_x ),     Y=slice(begin_tile_y,end_tile_y))]  = xr.concat(([list_images.sel(stack_images=i,X=slice(-overlap,tile_size)) , stitched.sel(X=slice(end_tile_x-overlap,end_tile_x),      Y=slice(begin_tile_y,end_tile_y))]),dim="max").max("max")
-            # Top [:,:overlap]
-            stitched.loc[dict(Y=slice(begin_tile_y ,begin_tile_y+overlap), X=slice(begin_tile_x,end_tile_x))]  = xr.concat(([list_images.sel(stack_images=i,Y=slice(0,overlap))          , stitched.sel(Y=slice(begin_tile_y ,begin_tile_y+overlap), X=slice(begin_tile_x,end_tile_x))]),dim="max").max("max")
-            # Bottom [:,-overlap:]
-            stitched.loc[dict(Y=slice(end_tile_y-overlap,end_tile_y),      X=slice(begin_tile_x,end_tile_x))]  = xr.concat(([list_images.sel(stack_images=i,Y=slice(-overlap,tile_size)) , stitched.sel(Y=slice(end_tile_y-overlap,end_tile_y),      X=slice(begin_tile_x,end_tile_x))]),dim="max").max("max")
+            # blending for edges
+            if overlap_x > 0 or overlap_y > 0:
+                # Left
+                if overlap_x > 0:
+                    update_stitched_pos(dict(X=slice(begin_tile_x, begin_tile_x + overlap_x), Y=slice(begin_tile_y, end_tile_y), C=c_pos if "C" in stitched.dims else None), 
+                                        dict(X=slice(0, overlap_x)), i, mode=overlap_mode)
+                # Right
+                if overlap_x > 0:
+                    update_stitched_pos(dict(X=slice(end_tile_x - overlap_x, end_tile_x),     Y=slice(begin_tile_y, end_tile_y), C=c_pos if "C" in stitched.dims else None), 
+                                        dict(X=slice(w_tile - overlap_x, w_tile)), i, mode=overlap_mode)
+                # Top
+                if overlap_y > 0:
+                    update_stitched_pos(dict(Y=slice(begin_tile_y, begin_tile_y + overlap_y), X=slice(begin_tile_x, end_tile_x), C=c_pos if "C" in stitched.dims else None), 
+                                        dict(Y=slice(0, overlap_y)), i, mode=overlap_mode)
+                # Bottom
+                if overlap_y > 0:
+                    update_stitched_pos(dict(Y=slice(end_tile_y - overlap_y, end_tile_y),      X=slice(begin_tile_x, end_tile_x), C=c_pos if "C" in stitched.dims else None), 
+                                        dict(Y=slice(h_tile - overlap_y, h_tile)), i, mode=overlap_mode)
+
+    if overlap_mode == "blend":
+        logger.info("Normalizing blended image by weights")
+        # Avoid division by zero
+        stitched.values = stitched.values / np.maximum(weights.values, 1e-6)
+        # Cast back to uint16
+        stitched = stitched.clip(min=0, max=65535).astype(np.uint16)
 
     logger.info("Stitching Done!")
+    logger.info(f"Stitched array value range: {stitched.min().item()} to {stitched.max().item()}")
+    
     # Channel offset placeholder
     if offset_channel is not None and 'C' in stitched.dims:
         logger.info("Offsetting Channels")
@@ -478,6 +909,19 @@ def stitch_dragonfly_tiles(
 
     logger.info("Cropping Empty tiles")
     stitched = crop_zero_borders(stitched)
+
+    if gaussian_sigma > 0:
+        logger.info(f"Applying Gaussian filter with sigma={gaussian_sigma}")
+        # Apply Gaussian filtering to each channel if present
+        if "C" in stitched.dims:
+            for c in stitched.C:
+                chan_data = stitched.sel(C=c).values
+                filtered = gaussian(chan_data, sigma=gaussian_sigma, preserve_range=True)
+                stitched.loc[dict(C=c)] = filtered.astype(np.uint16)
+        else:
+            filtered = gaussian(stitched.values, sigma=gaussian_sigma, preserve_range=True)
+            stitched.values = filtered.astype(np.uint16)
+
     # Reordering Axes to Match OME format
     res = ''
     for i,letter in enumerate(list("TCZYXS")):
@@ -639,12 +1083,20 @@ def main():
         help="Refine overlap using image correlation (slow)."
     )
     parser.add_argument(
-        "--crop_overlap", action="store_true",
+        "--overlap_mode", type=str, choices=["max", "mean", "crop", "blend"], default="blend",
         help="Stitch using hard cropping (instead of max blending)."
     )
     parser.add_argument("--disable_logger", action="store_true",
-    help="Whether or not to use the logger, useful to deactivate when multiple images are stitched in parallel")
-    
+        help="Whether or not to use the logger, useful to deactivate when multiple images are stitched in parallel")
+    parser.add_argument("--metadata_format", type=str, choices=["dragonfly", "zeiss_zen"], default="dragonfly",
+        help="Format of the metadata and tiles (dragonfly or zeiss_zen)")
+    parser.add_argument("--gaussian_sigma", type=float, default=0.0,
+        help="Sigma for Gaussian filtering at the end of stitching (0 to disable)")
+    parser.add_argument("--normalize", action="store_true",
+        help="Normalize intensity between tiles")
+    parser.add_argument("--split_by_scene", action="store_true",
+        help="Stitch tiles separately for each scene (s index in filename)."
+    )
 
     args = parser.parse_args()
     stitch_dragonfly_tiles(
@@ -660,11 +1112,14 @@ def main():
         tile_size=args.tile_size,
         overlap=args.overlap,
         refine_overlap=args.refine_overlap,
-        max_overlap=not args.crop_overlap,
-        crop_overlap=args.crop_overlap,
+        overlap_mode=args.overlap_mode,
         disable_logger=args.disable_logger,
         offset_channel=None,  # Future implementation
         attrs = args.attrs,
+        metadata_format=args.metadata_format,
+        gaussian_sigma=args.gaussian_sigma,
+        normalize_intensity=args.normalize,
+        split_by_scene=args.split_by_scene,
     )
 
 if __name__ == "__main__":
